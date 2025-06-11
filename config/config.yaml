@@ -1,0 +1,39 @@
+result_dir: result
+reload: True
+days_num: 1
+search_days_num: 30
+average_params: [5,10,20,30,60]
+month_nums: 2
+week_nums: 3
+week_volume_increase_factor: 3
+database_dir: database
+stock_data_daily_raw_dir: stock_data_daily_raw
+finance_data_info: {
+  update: False,
+  dir: finance_data
+}
+listed_date_info: {
+  update: False,
+  filepath: listed_date.csv
+}
+concept_info: {
+  all_concepts: {
+    update: False,
+    filepath: all_concepts.csv,
+    stocks_of_concept_dir: stocks_of_concept
+  },
+  concepts_of_stock: {
+    update: False,
+    filepath: concepts_of_stock.csv
+  }
+}
+
+# target_concepts_keywords: [
+#   '半导体','芯片','机器人','新能源','算力','PCB','光模块','光通信','电池'
+#   '人工智能','AI','数据','东数西算','Kimi','Sora','数字','豆包',
+#   '信创','GPT','Web','华为','低空','液冷','铜缆','服务器','减速器','传感器','电机',
+#   '电商','零售','冰雪','谷子','改革','预制菜','乳业','电','DeepSeek'
+# ]
+target_concepts_keywords: [
+  '半导体','芯片'
+]
