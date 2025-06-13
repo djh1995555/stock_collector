@@ -1,8 +1,18 @@
+share_type: 'TuShare'
 result_dir: result
 reload: True
-days_num: 1
-search_days_num: 30
-average_params: [5,10,20,30,60]
+
+average_params: [5,10,20,30,60] # 均线规格
+
+lower_change_pct_after_limit_up: 0.02
+days_num: 90 #获取全部数据的时间范围（天）
+search_days_num: 30 # 向前搜索涨停（大涨幅）的时间范围
+
+# 判断股价是否在一定时期内都在目标均线上方
+trend_search_days_num: 20
+target_average_level: 10
+margin: 0.00
+
 month_nums: 2
 week_nums: 3
 week_volume_increase_factor: 3

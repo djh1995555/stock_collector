@@ -3,13 +3,14 @@ import time
 import os
 import requests
 import pandas as pd
-import akshare as ak
 from tqdm import tqdm
-from env import *
+from utils import *
+from share_collector import ShareCollector
 
 class StockSelector:
 	def __init__(self, cfg):
 		self.cfg = cfg
+		self.share_collector = ShareCollector(cfg)
 		dtype_dict = {
 				'代码': str
 		}
@@ -27,11 +28,7 @@ class StockSelector:
 		# 	df = pd.concat([df, tmp_df])
 		# self.all_stock_id = df
 
-		# self.all_stock_id = self.get_stocks_by_area('all')
-
-		all_stock_id_filepath = os.path.join(ROOT_DIR,'all_stock_id.csv')
-		self.all_stock_id = pd.read_csv(all_stock_id_filepath, dtype=dtype_dict)
-		print(f'query {self.all_stock_id.shape[0]} stocks data!')
+		self.all_stock_id = self.share_collector.get_all_stock_id()
 
 		self.result_dir = os.path.join(ROOT_DIR, cfg['result_dir'])
 		if(not os.path.exists(self.result_dir)):
@@ -70,8 +67,8 @@ class StockSelector:
 		if(not os.path.exists(daily_result_dir)):
 			os.makedirs(daily_result_dir)
 		raw_data_filepath = f'{daily_result_dir}/result_{date}_raw.csv'
-		df = self.all_stock_id[['代码','名称','市盈率-动态','市净率','总市值','流通市值']]
-		if(self.cfg['reload']):
+		df = self.all_stock_id
+		if(not os.path.exists(raw_data_filepath) or self.cfg['reload']):
 			for i, row in tqdm(df.iterrows(), total = df.shape[0]):
 				stock_id = row['代码']
 				days_num = self.cfg['days_num']
@@ -80,18 +77,95 @@ class StockSelector:
 					continue
 				
 				data = self.compute_average(data, stock_id, date, self.cfg['average_params'])
-				data = self.compute_limit_up_flag(data, stock_id, date)
+				data = self.get_last_close_price(data)
+				data = self.get_last_volume(data)
+				data = self.compute_limit_up_flag(data)
+				if(data.shape[0] == 0):
+					print(f'{stock_id} data is null')
+				data.to_csv(os.path.join(self.stock_data_daily_raw_dir, date, f'{stock_id}_1.csv'))
 
 				week_nums = self.cfg['week_nums']
 				week_volumes, df.loc[i,'is_week_volume_increase'] = self.compute_week_volume(data, week_nums, self.cfg['week_volume_increase_factor'])
 				for j in range(week_nums):
 					df.loc[i,f'{j - week_nums + 1} week volume'] = week_volumes[j]
-
 				df.loc[i,'is_bullish_alignment'] = self.is_bullish_alignment(data, self.cfg['average_params'])
 				df.loc[i,'is_hold_after_limit_up'] = self.is_hold_after_limit_up(data, self.cfg['search_days_num'])
+				df.loc[i,'is_upper_than_n_average'] = self.is_upper_than_n_average(data, self.cfg['trend_search_days_num'], self.cfg['margin'])
 			df.to_csv(raw_data_filepath)
-					
+		else:
+			dtype_dict = {
+					'代码': str
+			}
+			df = pd.read_csv(raw_data_filepath, dtype=dtype_dict)
 
+		is_hold_after_limit_up_df = df.loc[
+			(df['is_hold_after_limit_up'] == True)
+		]
+		is_hold_after_limit_up_df.to_csv(f'{daily_result_dir}/result_of_is_hold_after_limit_up.csv')
+
+		is_upper_than_n_average_df = df.loc[
+			(df['is_upper_than_n_average'] == True)
+		]
+		is_upper_than_n_average_df.to_csv(f'{daily_result_dir}/result_of_is_upper_than_n_average.csv')
+
+		intersection_df = df.loc[
+			(df['is_hold_after_limit_up'] == True)
+			& (df['is_upper_than_n_average'] == True)
+		]
+		intersection_df.to_csv(f'{daily_result_dir}/result_of_both.csv')
+
+	def is_upper_than_n_average(self, df, trend_search_days_num, margin):
+		df = df.tail(trend_search_days_num)
+		return (df['收盘'] > df[f"{self.cfg['target_average_level']} average"] * (1-margin)).all()
+
+	def get_last_close_price(self, df):
+		df['昨日收盘'] = df['收盘'].shift(1)
+		return df
+	
+	def get_last_volume(self, df):
+		df['昨日成交量'] = df['成交量'].shift(1)
+		return df
+
+	def get_limit_up_change_pct(self, stock_id):
+		price_limit = 0.1
+		stock_id = str(stock_id).strip()
+		prefix = stock_id[:3]
+		if prefix.startswith(('60', '00')):
+			price_limit = 0.1
+		elif prefix.startswith('30'):
+			price_limit = 0.2
+		elif prefix.startswith('688'):
+			price_limit = 0.2
+		return price_limit
+	
+	def is_limit_up(self, row):
+		stock_id = row['股票代码']
+		price_today = row['收盘']
+		price_yesterday = row['昨日收盘']
+		if(price_yesterday == None):
+			return False
+
+		price_limit = self.get_limit_up_change_pct(stock_id)
+
+		limit_up_price = round_num(price_yesterday * (1 + price_limit), 2)
+		price_today = round_num(price_today, 2)
+		return price_today == limit_up_price
+	
+	def compute_limit_up_flag(self, df):
+		if(df.shape[0] == 0):
+			return pd.DataFrame()
+		df['is_limit_up'] = df.apply(self.is_limit_up, axis=1)
+		return df
+		
+	def compute_average(self, df, stock_id, date, average_params):
+		if(df.shape[0] == 0):
+			return pd.DataFrame()
+		
+		for average_param in average_params:
+			df[f'{average_param} average'] = round(df['收盘'].rolling(average_param).mean(),2)
+			df[f'error with {average_param} avg'] = round((df['收盘'] - df[f'{average_param} average']) / df['收盘'] * 100,2)
+		return df
+	
 	def is_hold_after_limit_up(self, df, search_days_num):
 		length = df.shape[0]
 		if(length < search_days_num):
@@ -99,21 +173,26 @@ class StockSelector:
 		find_limit_up = False
 		for i in reversed(range(length - search_days_num, length - 2)):
 			row = df.iloc[i,:]
-			if(row['is_limit_up']):
+			if(row['is_limit_up'] or row['涨跌幅'] > 10):
 				find_limit_up = True
+				limit_up_price = row['收盘']
+				limit_up_change = row['涨跌幅']
+				lower_bound_price = limit_up_price * (1 - limit_up_change * self.cfg['lower_change_pct_after_limit_up'] / 10)
 				break
-		limit_up_index = i
 
 		if(not find_limit_up):
 			return False
 		
-		if(df.loc[limit_up_index, '涨跌幅'] < -2.0):
-			return False
-		
+		limit_up_index = i
 		limit_up_row = df.iloc[limit_up_index,:]
 		for i in range(limit_up_index + 1, length):
 			row = df.iloc[i,:]
-			if(row['收盘'] < row['5 average'] or row['成交量'] > 1.5 * limit_up_row['成交量']):
+			last_price = row['昨日收盘']
+			change_in_today = (row['最高']- row['收盘']) / last_price
+			change_in_today_limit = self.get_limit_up_change_pct(row['股票代码']) * 0.4
+			if(
+				row['收盘'] < lower_bound_price or 
+				row['收盘'] < row['5 average']):
 				return False
 		return True
 	
@@ -150,59 +229,21 @@ class StockSelector:
 				re = False
 				break
 		return re
-	
-	def compute_limit_up_flag(self, df, stock_id, date):
-		if(df.shape[0] == 0):
-			return pd.DataFrame()
-
-		for i, row in df.iterrows():
-			if(i == 0):
-				df.loc[i,'is_limit_up'] = None
-				continue
-			last_row = df.iloc[i-1,:]
-			df.loc[i,'is_limit_up'] = self.is_limit_up(row['股票代码'], row['收盘'], last_row['收盘'])
-
-		# filepath = os.path.join(self.stock_data_daily_raw_dir, date, f'{stock_id}_2.csv')
-		# df.to_csv(filepath)
-		return df
-
-	def is_limit_up(self, stock_id, price_today, price_yesterday):
-		price_limit = 0.1
-		stock_id = str(stock_id).strip()
-		prefix = stock_id[:3]
-		if prefix.startswith(('60', '00')):
-			price_limit = 0.1
-		elif prefix.startswith('30'):
-			price_limit = 0.2
-		elif prefix.startswith('688'):
-			price_limit = 0.2
-
-		limit_up_price = round(price_yesterday * (1 + price_limit), 2)
-		return price_today ==limit_up_price
-		
-	def compute_average(self, df, stock_id, date, average_params):
-		if(df.shape[0] == 0):
-			return pd.DataFrame()
-
-		end_date = date
-		end_data = df[df['日期'] == self.transform_date(end_date)]
-		if(end_data.empty):
-			return pd.DataFrame()			
-
-		for average_param in average_params:
-			df[f'{average_param} average'] = round(df['收盘'].rolling(average_param).mean(),2)
-			df[f'error with {average_param} avg'] = round((df['收盘'] - df[f'{average_param} average']) / df['收盘'] * 100,2)
-
-		# filepath = os.path.join(self.stock_data_daily_raw_dir, date, f'{stock_id}_averaged.csv')
-		# df.to_csv(filepath)
-		return df
 
 	def get_data(self, stock_id, date, days_num):
 		target_dir = os.path.join(self.stock_data_daily_raw_dir, date)
 		filepath = os.path.join(target_dir, f'{stock_id}.csv')
 		if(os.path.exists(filepath)):
 			dtype_dict = {
-					'股票代码': str
+					'股票代码': str,
+					'开盘':float,
+					'最高':float,
+					'最低':float,
+					'收盘':float,
+					'涨跌额':float,
+					'涨跌幅':float,
+					'成交量':float,
+					'成交额':float,
 			}
 			df = pd.read_csv(filepath, parse_dates=['日期'],dtype=dtype_dict)
 			df['日期'] = df['日期'].dt.date	
@@ -212,23 +253,15 @@ class StockSelector:
 			end_date = date
 			start_date = self.get_target_date(end_date, days_num)
 			try:
-					time.sleep(0.1)
-					df = ak.stock_zh_a_hist(symbol=stock_id, period="daily", start_date = start_date, end_date = end_date, adjust="qfq")
-					df.to_csv(filepath)
+					# time.sleep(0.1)
+					# df = ak.stock_zh_a_hist(symbol=stock_id, period="daily", start_date = start_date, end_date = end_date, adjust="qfq")
+					df = self.share_collector.get_stock_hist(stock_id=stock_id, period="daily", start_date = start_date, end_date = end_date, adjust="qfq")
+					if(df.shape[0] != 0):
+						df.to_csv(filepath)
 			except requests.exceptions.ConnectionError:
 					print(f'data is missing:{date}_{stock_id}')
 					return pd.DataFrame()
 		return df
-
-	def insert_string(self, original_string, position, inserted_string):
-		return original_string[:position] + inserted_string + original_string[position:]
-	
-	def transform_date(self, date, to_datetime = True):
-		date = self.insert_string(date,4,'-')
-		date = self.insert_string(date,7,'-')
-		if(to_datetime):
-			date = datetime.strptime(date, "%Y-%m-%d").date()
-		return date
 	
 	def get_target_date(self, cur_date, delta_days):
 		original_date = datetime.strptime(cur_date, "%Y%m%d")
@@ -246,7 +279,7 @@ class StockSelector:
 			for concept in concept_list:
 				if(target_concept in concept):
 					all_target_concepts.append(concept)
-		print(all_target_concepts)
+		# print(all_target_concepts)
 		return all_target_concepts
 	
 	def update_finance_data(self, finance_data_dir):
@@ -258,13 +291,15 @@ class StockSelector:
 				stock_id = f"{row['area']}{row['代码']}"
 				finace_data_filepath = f"{finance_data_dir}/{row['代码']}.csv"
 				try:
-						df = ak.stock_profit_sheet_by_report_em(symbol=stock_id)
+						# df = ak.stock_profit_sheet_by_report_em(symbol=stock_id)
+						df = self.share_collector.get_stock_profit_report(stock_id=stock_id)
 				except KeyError:
 						print(f'data is missing:{stock_id}')
 				df.to_csv(finace_data_filepath)
 
 	def get_listed_date(self,row):
-		info = ak.stock_individual_info_em(symbol=row['代码'])
+		# info = ak.stock_individual_info_em(symbol=row['代码'])
+		info = self.share_collector.get_stock_info(stock_id=row['代码'])
 		return info.loc[info['item']=='上市时间']['value'].values[0]
 
 	def update_listed_date(self,listed_date_filepath):
@@ -288,7 +323,8 @@ class StockSelector:
 	def update_all_concepts(self, all_concepts_filepath, stocks_of_concept_dir):
 		print('update_all_concepts')
 		# 更新当前所有的概念
-		concept_df = ak.stock_board_concept_name_em()
+		# concept_df = ak.stock_board_concept_name_em()
+		concept_df = self.share_collector.get_all_concept()
 		concept_df.to_csv(all_concepts_filepath)
 		# concept_df = pd.read_csv('concept.csv')
 
@@ -300,7 +336,8 @@ class StockSelector:
 			concept_name = row['板块名称']
 			concept_name_valid = concept_name.replace('/','-')
 			target_concept_data_filename = f'{stocks_of_concept_dir}/{concept_name_valid}.csv'
-			stocks_df = ak.stock_board_concept_cons_em(symbol=concept_name)
+			# stocks_df = ak.stock_board_concept_cons_em(symbol=concept_name)
+			stocks_df = self.share_collector.get_stock_of_concept(concept=concept_name)
 			stocks_df.to_csv(target_concept_data_filename)
 
 	
@@ -322,17 +359,7 @@ class StockSelector:
 		df = df[['代码','名称','concepts']]
 		df.to_csv(concepts_of_stock_filepath)
 
-	def get_stocks_by_area(self, type):
-		print(f'query data of {type}!')
-		stock_dict = {
-			'all':ak.stock_zh_a_spot_em,
-			'shanghai':ak.stock_sh_a_spot_em,
-			'shenzhen':ak.stock_sz_a_spot_em,
-			'beijing':ak.stock_bj_a_spot_em,
-			'chuangyeban':ak.stock_cy_a_spot_em,
-			'kechuangban':ak.stock_zh_kcb_spot,
-		}
-		return stock_dict[type]()
+
 	
 
 
